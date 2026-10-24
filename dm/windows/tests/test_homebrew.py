@@ -126,9 +126,10 @@ class KernelTests(unittest.TestCase):
     def test_own_homebrew_and_entry_abi(self):
         result = execute_nro(parse_nro(pack_nro(fixture_code())))
         self.assert_success(result)
-        self.assertEqual([v["id"] for v in result["svc_calls"]], [39, 1, 6, 30, 30, 39, 7])
+        self.assertEqual([v["id"] for v in result["svc_calls"]],
+                         [39, 1, 6, 30, 30, 39, 31, 33, 33, 22, 33, 39, 22, 7])
         self.assertEqual([v["text"] for v in result["logs"]],
-                         ["homebrew: start\n", "homebrew: checks\n"])
+                         ["homebrew: start\n", "homebrew: checks\n", "homebrew: ipc\n"])
         self.assertEqual(result["entry"]["x0"], ENV)
         self.assertEqual(result["entry"]["x1"], (1 << 64)-1)
         self.assertEqual(result["entry"]["sp"] % 16, 0)

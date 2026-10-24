@@ -11,6 +11,7 @@ import unicorn as uc
 from unicorn import arm64_const as arm
 
 from .nro import PAGE, Nro, load_nro
+from .ipc import IPC_SIZE, IpcError, Services, MAX_SESSIONS, OUT_OF_RANGE
 
 IMAGE = 0x10000000
 HEAP = 0x20000000
@@ -20,6 +21,7 @@ STACK = 0x30000000
 STACK_SIZE = 1024 * 1024
 ENV = 0x31000000
 RETURN = 0x32000000  # deliberately unmapped; returning is not ExitProcess
+TLS = 0x33000000
 AS_END = 1 << 39
 INVALID_SIZE = 0xCA01
 OUT_OF_MEMORY = 0xD001
@@ -30,17 +32,19 @@ REGS = (arm.UC_ARM64_REG_X0, arm.UC_ARM64_REG_X1, arm.UC_ARM64_REG_X2,
         arm.UC_ARM64_REG_X3, arm.UC_ARM64_REG_X4, arm.UC_ARM64_REG_X5,
         arm.UC_ARM64_REG_X6, arm.UC_ARM64_REG_X7)
 NAMES = {1: "SetHeapSize", 6: "QueryMemory", 7: "ExitProcess",
-         0x1E: "GetSystemTick", 0x27: "OutputDebugString"}
+         0x16: "CloseHandle", 0x1E: "GetSystemTick", 0x1F: "ConnectToNamedPort",
+         0x21: "SendSyncRequest", 0x27: "OutputDebugString"}
 
 
-def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
+def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0,
+                language="en-US", session_capacity=MAX_SESSIONS):
     """Run a validated NRO or file path; success means ExitProcess without errors.
 
     SVC register convention is the raw kernel ABI, not libnx's C wrappers.
     Invalid guest arguments return Horizon Results; host bounds stop execution.
     """
     report = {"schema": 1, "backend": f"Unicorn {uc.__version__} ARM64",
-              "abi": "Horizon-AArch64-five-svc-subset", "kernel_exit": False,
+              "abi": "Horizon-AArch64-eight-svc-cmif-subset", "kernel_exit": False,
               "termination": None, "success": False, "process_exit_status": 1,
               "instructions": 0, "svc_calls": [], "logs": [], "error": None,
               "loaded_segments": [], "heap_size": 0,
@@ -49,6 +53,11 @@ def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
     if (not isinstance(instruction_limit, int) or not 1 <= instruction_limit <= 100_000_000
             or not math.isfinite(time_limit) or not 0 < time_limit <= 60):
         report["error"] = "invalid_budget"
+        return report
+    try:
+        services = Services(language, session_capacity)
+    except ValueError as error:
+        report["error"] = str(error)
         return report
     try:
         # Even supplied Nro objects are revalidated, so metadata cannot bypass checks.
@@ -78,6 +87,13 @@ def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
     map_region(STACK, STACK_SIZE, 0xB, 3, "stack")
     # Homebrew ABI ConfigEntry {u32 key, u32 flags, u64 value[2]}, EndOfList=0.
     map_region(ENV, PAGE, 8, 1, "environment", bytes(24))
+    map_region(TLS, PAGE, 0xC, 3, "tls")
+    engine.reg_write(arm.UC_ARM64_REG_TPIDRRO_EL0, TLS)
+    report["tls"] = {"base": TLS, "mapped_bytes": PAGE, "ipc_bytes": IPC_SIZE,
+                     "thread_local_region_bytes": 0x200, "other_fields_implemented": False}
+    report["services"] = {"language": language, "synthetic_pid": 1,
+                          "session_capacity": session_capacity,
+                          "handle_lifecycle": services.lifecycle}
     engine.reg_write(REGS[0], ENV)
     engine.reg_write(REGS[1], (1 << 64)-1)
     engine.reg_write(arm.UC_ARM64_REG_SP, STACK+STACK_SIZE)
@@ -187,6 +203,39 @@ def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
         elif number == 0x1E:
             tick = (time.perf_counter_ns()-started)*19_200_000//1_000_000_000
             engine.reg_write(REGS[0], tick)
+        elif number == 0x1F:
+            name = bytearray()
+            handle = None
+            for offset in range(12):
+                if not accessible(args[1]+offset, 1, 1):
+                    result = INVALID_POINTER
+                    break
+                byte = engine.mem_read(args[1]+offset, 1)[0]
+                if byte == 0:
+                    result, handle = services.connect(bytes(name))
+                    break
+                name.append(byte)
+            else:
+                result = OUT_OF_RANGE
+            trace["port_hex"] = name.hex()
+            engine.reg_write(REGS[0], result)
+            engine.reg_write(REGS[1], handle if handle is not None else 0)
+        elif number == 0x16:
+            result = services.close(args[0])
+            engine.reg_write(REGS[0], result)
+        elif number == 0x21:
+            # This fixed-size mapped TLS buffer is the only implicit IPC memory.
+            request = bytes(engine.mem_read(TLS, IPC_SIZE))
+            trace["ipc"] = {"request_hex": request.hex(), "response_hex": None}
+            try:
+                result, packet, decoded = services.dispatch(args[0], request)
+                trace["ipc"].update(decoded, transport_result=result)
+                if packet is not None:
+                    engine.mem_write(TLS, packet)
+                    trace["ipc"]["response_hex"] = packet.hex()
+            except IpcError as error:
+                fail(str(error))
+            engine.reg_write(REGS[0], result)
         elif number == 0x27:
             pointer, size = args[:2]
             if size and not accessible(pointer, size, 1):
@@ -203,7 +252,7 @@ def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
         else:
             fail(f"unsupported_svc: 0x{number:04x} pc=0x{site:x}")
         trace["out"] = [engine.reg_read(r) for r in REGS]
-        if number in (1, 6, 0x27) and report["error"] is None:
+        if number in (1, 6, 0x16, 0x1F, 0x21, 0x27) and report["error"] is None:
             trace["result"] = result
 
     engine.hook_add(uc.UC_HOOK_CODE, code_hook)
@@ -217,6 +266,7 @@ def execute_nro(nro, *, instruction_limit=1_000_000, time_limit=5.0):
         fail("budget_time: Unicorn timeout" if engine.query(uc.UC_QUERY_TIMEOUT)
              else "missing_exit: execution stopped without ExitProcess")
     report["pc"] = engine.reg_read(arm.UC_ARM64_REG_PC)
+    report["services"]["live_handles"] = sorted(services.sessions)
     report["elapsed_seconds"] = (time.perf_counter_ns()-started)/1e9
     report["success"] = report["kernel_exit"] and report["error"] is None
     report["process_exit_status"] = 0 if report["success"] else 1

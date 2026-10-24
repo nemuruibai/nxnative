@@ -8,7 +8,8 @@ Windows development: a separate [ARM64 first-frame prototype](docs/windows-proto
 runs synthetic test code through Unicorn and displays its software framebuffer.
 It does not run Switch games or implement NVN/Vulkan on Windows.
 The separate [freestanding homebrew milestone](docs/windows-homebrew.md) loads
-own AArch64 NRO files with a five-call Horizon SVC subset (no full libnx or game support).
+own AArch64 NRO files with eight Horizon SVCs and minimal SM/set CMIF IPC
+(no full libnx or game support).
 
 ## Acknowledgements
 

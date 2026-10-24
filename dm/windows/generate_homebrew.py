@@ -30,7 +30,9 @@ def pack_nro(code, *, rodata=None, data=None, bss_size=0x1000):
     struct.pack_into("<4siiiiii", image, 0x1000, b"MOD0", 0x20, 0x2000,
                      0x2000+bss_size, 0, 0, 0)
     # +0x1020: one zeroed Elf64_Dyn DT_NULL entry.
-    rodata = b"homebrew: start\n" + b"homebrew: checks\n" if rodata is None else rodata
+    if rodata is None:
+        rodata = (b"homebrew: start\n" + b"homebrew: checks\n").ljust(0x40, b"\0")
+        rodata += b"sm:\0" + bytes(12) + b"homebrew: ipc\n"
     data = struct.pack("<Q", 0x1234) if data is None else data
     if len(rodata) > 0xFC0 or len(data) > 0x1000:
         raise ValueError("fixture sections exceed one page")

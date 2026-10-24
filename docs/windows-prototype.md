@@ -6,7 +6,7 @@ Ryzen host this is CPU emulation/translation, rather than native ARM execution.
 It does not use games, keys, firmware, extracted assets, or a game profile.
 
 A separate [freestanding homebrew path](windows-homebrew.md) now loads own NRO
-files using five real Horizon SVCs. This synthetic demo and its private ABI remain
+files using eight real Horizon SVCs and minimal SM/set CMIF IPC. This synthetic demo and its private ABI remain
 independent and unchanged.
 
 The Apple host and its graphics/shader build remain independent. This milestone

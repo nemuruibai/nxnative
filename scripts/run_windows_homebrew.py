@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a freestanding AArch64 NRO using the five-SVC Windows Horizon subset.
+"""Run a freestanding AArch64 NRO using the Windows Horizon SVC/CMIF subset.
 
 Spyder: select .venv-windows/Scripts/python.exe, open this file, press F5.
 Terminal arguments override Settings; the script never installs dependencies.
@@ -15,6 +15,7 @@ GUEST = ""  # empty = build and load own checked-in homebrew fixture
 OUTPUT = ""  # empty = <repository>/out/windows-homebrew
 INSTRUCTION_LIMIT = 1_000_000
 TIME_LIMIT = 5.0
+LANGUAGE = "en-US"  # set/GetLanguageCode; own selftest asserts en-US
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,6 +33,8 @@ def main(argv=None):
                         ROOT / "out/windows-homebrew")
     parser.add_argument("--instruction-limit", type=int, default=INSTRUCTION_LIMIT)
     parser.add_argument("--time-limit", type=float, default=TIME_LIMIT)
+    parser.add_argument("--language", default=LANGUAGE,
+                        help="set service language code (own selftest expects en-US)")
     args = parser.parse_args(argv)
     if not 1 <= args.instruction_limit <= 100_000_000:
         parser.error("--instruction-limit must be between 1 and 100000000")
@@ -50,7 +53,7 @@ def main(argv=None):
                                "see docs/windows-homebrew.md. " + str(error)) from error
         guest = args.guest if args.guest is not None else write_fixture(args.output / "selftest.nro")
         report = execute_nro(guest, instruction_limit=args.instruction_limit,
-                             time_limit=args.time_limit)
+                             time_limit=args.time_limit, language=args.language)
         report["guest_path"] = str(guest.resolve())
         report["guest_selection"] = "external" if args.guest is not None else "own_selftest"
         for segment in report.get("loaded_segments", []):
@@ -61,6 +64,12 @@ def main(argv=None):
             outputs = ",".join(f"x{i}=0x{v:x}" for i, v in enumerate(call['out'][:2]))
             print(f"SVC 0x{call['id']:02x} {call['name']} pc=0x{call['pc']:x}: "
                   f"{inputs} -> {outputs}")
+            if "ipc" in call:
+                ipc = call["ipc"]
+                print(f"IPC {ipc.get('service')} command={ipc.get('command')} "
+                      f"transport={ipc.get('transport_result')} "
+                      f"service_result={ipc.get('service_result')} "
+                      f"moved_handle={ipc.get('moved_handle')}")
         for log in report.get("logs", []):
             # repr avoids guest control characters altering the host terminal.
             print(f"DEBUG ({log['size']} bytes): {log['text']!r}")

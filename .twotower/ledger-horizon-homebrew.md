@@ -69,3 +69,25 @@
   broad test rerun were needed. Original first-frame ledger is preserved.
 - Limits: single-thread, own freestanding source only; not full Horizon/libnx,
   arbitrary homebrew support, Switch hardware validation or game compatibility.
+
+## 2026-10-25 - Upstream synchronization and follow-up check
+
+- Upstream `seedds/nxnative` main at `6a0687721a1da9a6a0273c6ce2f11eedcf4af445`
+  was merged without conflicts into `windows-prototype` as
+  `1936d7c6c0e16b396e7b86edeaa18d646700a93f` and pushed to
+  `nemuruibai/nxnative` on the same branch.
+- Post-merge Windows verification passed: all 34 tests in 24.044 s, no skips;
+  actual Tk first-frame display and pixel checks, headless BMP output, default
+  homebrew launch, and external NRO launch from `C:\Windows` all exited 0.
+- Follow-up upstream check: `git fetch origin main` succeeded and
+  `git rev-list --count HEAD..origin/main` returned 0. Upstream remained at
+  `6a06877`; the current branch already contained all upstream commits. No new
+  merge or test rerun was needed. This records the completed check, not a claim
+  that upstream will remain unchanged.
+- Cleanup: the previous post-merge run's five log/report files were already
+  removed at the user's request. The follow-up fetch created no scratch output.
+  Cleanup of the remaining two BMPs, one NRO and four post-merge output directories
+  was attempted with bounded literal PowerShell paths, but execution was rejected
+  with `blocked by policy` before the command ran. These artifacts remain under
+  the four `out/windows-*-upstream-merge*` directories; cleanup is incomplete.
+  Earlier milestone evidence and `.venv-windows` are preserved.

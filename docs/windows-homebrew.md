@@ -1,16 +1,19 @@
 # Windows freestanding Horizon homebrew milestone
 
 This separate Windows x64 path runs a self-authored, position-independent AArch64
-homebrew NRO through Unicorn 2.1.4 and handles **five real Horizon SVC numbers and
+homebrew NRO through Unicorn 2.1.4 and handles **eight real Horizon SVC numbers and
 register conventions**. It is a bounded, single-thread kernel subset. The default
 program checks initialized data, zero bss, entry arguments/stack alignment, heap
-allocation/store/load, QueryMemory and tick ordering, prints two checkpoints, then
-calls ExitProcess. Failed assertions execute `BRK #1` and fail the run.
+allocation/store/load, QueryMemory and tick ordering, then executes
+`ConnectToNamedPort("sm:") -> RegisterClient -> GetService("set") ->
+GetLanguageCode`, closes both sessions and calls ExitProcess. It prints three
+checkpoints. Failed assertions execute `BRK #1` and fail the run.
 
 This is a freestanding assembly homebrew with standard NRO0 and MOD0 headers,
 not a full libnx application. There has been no Switch hardware test. It provides
-no IPC, handles, threading, TLS, scheduling, filesystem, services, input, audio,
-graphics, NVN/Vulkan, NSO/NSP loading, or game compatibility. Arbitrary third-party
+only the bounded CMIF/SM/set IPC, TLS command buffer and session handles described
+below. It provides no threading, scheduling, filesystem, input, audio, graphics,
+NVN/Vulkan, NSO/NSP loading, or game compatibility. Arbitrary third-party
 NROs and libnx initialization are unsupported. No firmware, game, keys or Nintendo
 code is required. Guest code has no host-file API; Unicorn is not advertised as a
 security sandbox. The Apple host/build/shader chain is unchanged.
@@ -38,6 +41,9 @@ python -m venv .venv-windows
 
 # Deliberate bounded failure (exit status 1):
 .\scripts\run_windows_homebrew.cmd --instruction-limit 1 --output out/windows-homebrew-limit
+
+# Deliberate guest language assertion failure (selftest expects en-US):
+.\scripts\run_windows_homebrew.cmd --language ja --output out/windows-homebrew-ipc-language
 ```
 
 Double-click `scripts/run_windows_homebrew.cmd` to run the default homebrew. With
@@ -115,6 +121,7 @@ not a claim to implement every standard NRO feature.
 | Stack | `0x30000000` | 1 MiB, SP at top and 16-byte aligned |
 | Environment | `0x31000000` | Read-only page; valid 24-byte ConfigEntry EndOfList |
 | Return sentinel | `0x32000000` | LR points to unmapped address; return fails |
+| TLS | `0x33000000` | Zero RW page; TPIDRRO_EL0 points here; IPC uses only first 0x100 bytes |
 | Address space | `[0, 2^39)` | Unmapped gaps queryable; never silently mapped |
 
 Homebrew entry receives X0 pointing at the terminated environment and X1=`UINT64_MAX`.
@@ -132,11 +139,15 @@ to a kernel handler would be incorrect.
 | `0x01 SetHeapSize` | X1=size | W0=Result, X1=heap base on success. X0 is not dereferenced. Size is 2 MiB aligned, including 0; misalignment returns `0xca01` InvalidSize. Above this runtime's 64 MiB cap returns `0xd001` OutOfMemory. Invalid requests do not mutate the heap. Grow/shrink preserves retained bytes, new/regrown bytes are zero. |
 | `0x06 QueryMemory` | X0=writable MemoryInfo pointer, X2=address | W0=Result; W1=PageInfo=0 on success. Exactly 40 bytes `<QQIIIIII>`: base, size, type, attributes, permission, IPC count, device count, padding. Invalid destination returns `0xe601` InvalidPointer. X1 is not an output pointer. Reports whole mappings and unmapped gaps; addresses at/above 2^39 return the reserved region `[2^39, 2^64)`, type `0x10`, permission 0. |
 | `0x07 ExitProcess` | No arguments | Stops process normally. No invented guest exit code. |
+| `0x16 CloseHandle` | W0=session handle | W0=Result. Removes a live session; invalid/closed handles return `0xe401` InvalidHandle. |
 | `0x1e GetSystemTick` | No arguments | X0=19.2 MHz ticks from a monotonic high-resolution host clock, with per-run epoch; nondecreasing, not required to increase on each call. No Result. |
+| `0x1f ConnectToNamedPort` | X1=readable NUL-terminated name | W0=Result, W1=client-session handle on success (zero on failure in this subset). X0 is not dereferenced. Reads bytewise, at most 12 bytes including NUL. Only `sm:` exists; unknown port `0xf201` NotFound, unreadable pointer `0xe601` InvalidPointer, no NUL in 12 bytes `0xee01` OutOfRange. |
+| `0x21 SendSyncRequest` | W0=session handle; request in TLS | W0=transport Result, SFCO response in first 0x100 TLS bytes. Invalid handle `0xe401`; handle capacity `0xd201` OutOfHandles. Service Results are separate in SFCO. |
 | `0x27 OutputDebugString` | X0=pointer, X1=explicit byte length | W0=Result. Reads exactly those bytes from readable guest memory, including embedded NULs. Invalid range returns `0xe601`; length 0 succeeds even for nullptr. |
 
 MemoryInfo types are 8 for NRO text/rodata/environment, 9 for mutable NRO data/bss,
-5 for heap, `0x0b` for stack, 0 for unmapped. Permissions are R=1, W=2, X=4.
+5 for heap, `0x0b` for stack, `0x0c` (ThreadLocal) for TLS, 0 for unmapped.
+Permissions are R=1, W=2, X=4.
 Attributes and reference counts are zero in this subset.
 
 Unknown SVCs fail with the number and PC. SleepThread, GetInfo and Break SVCs are
@@ -147,10 +158,60 @@ and debug output at 16 KiB total. Exceeding a host resource bound stops the run 
 a host error, rather than returning an invented Horizon Result. Even zero-length
 debug floods are bounded by the SVC trace cap.
 
+## Minimal synchronous IPC
+
+`dm/windows/ipc.py` separates bounded parsing, session ownership and service
+dispatch from the SVC hook. HIPC type 4 requests only, CMIF SFCI version/token 0,
+and no incoming buffer descriptors or handles are accepted. The optional special
+header has PID bit 0, copy count bits 1..4, move count bits 5..8. PID precedes
+handle arrays. Raw data follows the descriptor area; CMIF starts at its next
+16-byte alignment relative to TLS. Both header and required payload must lie
+within the declared raw-word extent and the 0x100-byte command buffer. libnx's
+trailing alignment allowance is accepted. Context/control/domain/TIPC requests,
+reserved fields and unsupported descriptors fail explicitly with a runtime error.
+Other ARM64 TLS region fields (the region is 0x200 bytes) are not implemented;
+host IPC never reads or writes past TLS+0x100.
+
+SM command 0 requires both the PID descriptor and an 8-byte raw placeholder.
+The kernel supplies the documented synthetic PID 1; neither guest value is
+trusted. Registration is per SM session, and repeating it succeeds. SM command 1
+requires the 8-byte name `set` padded with zeroes; unregistered clients receive
+transport success plus SM InvalidClient `0x415`. A successful lookup returns one
+moved client-session handle. Closing SM leaves that set session usable. Other
+services stop with `unsupported_service`; real SM may defer those requests,
+which this synchronous subset does not emulate. Unknown commands on supported
+sessions return CMIF UnknownCommandId `0x1ba0a`, not generic success.
+
+set command 0 returns a u64 language code (NUL-padded ASCII, little endian).
+`--language` or the launcher's `LANGUAGE` setting configures it; default `en-US`.
+Supported values: `ja`, `en-US`, `fr`, `de`, `it`, `es`, `zh-CN`, `ko`, `nl`, `pt`,
+`ru`, `zh-TW`, `en-GB`, `fr-CA`, `es-419`, `zh-Hans`, `zh-Hant`, `pt-BR`.
+The own default guest asserts en-US, so `--language ja` intentionally fails its
+guest assertion. A guest expecting ja succeeds under that configuration. This
+language setting is independent of the host OS/UI language.
+
+Handles are positive opaque 32-bit values, allocated monotonically per execution
+(capacity 32 live sessions); stale handles are never reused. Raw SVC handle
+arguments use W0, ignoring high X0 bits. Allocation happens after request validation;
+capacity failures allocate nothing and closing a session recovers capacity.
+No kernel thread scheduler or server-side guest process runs. `report.json`
+includes TLS limits, configured language/PID, bounded exact 0x100-byte request and
+response hex, decoded commands, transport/service Results, moved handles, handle
+open/close events and the final live handles. The trace cap also bounds IPC logs.
+
 ## Primary references
 
 - [libnx SVC assembly wrappers](https://github.com/switchbrew/libnx/blob/master/nx/source/kernel/svc.s)
   establish raw register conventions and no-argument ExitProcess.
+- [libnx HIPC](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/sf/hipc.h),
+  [CMIF](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/sf/cmif.h),
+  [SM](https://github.com/switchbrew/libnx/blob/master/nx/source/services/sm.c) and
+  [set](https://github.com/switchbrew/libnx/blob/master/nx/source/services/set.c)
+  define the supported request/response layouts and language command.
+- [Atmosphere SM](https://github.com/Atmosphere-NX/Atmosphere/blob/master/stratosphere/sm/source/sm_user_service.cpp),
+  [SM session state](https://github.com/Atmosphere-NX/Atmosphere/blob/master/stratosphere/sm/source/sm_user_service.hpp)
+  and [TLS](https://github.com/Atmosphere-NX/Atmosphere/blob/master/libraries/libvapours/include/vapours/svc/arch/arm64/svc_thread_local_region.hpp)
+  provide independent compact vectors, per-session registration and IPC bounds.
 - [libnx SVC declarations and MemoryInfo](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/kernel/svc.h)
   define numbers, types, permissions and the memory structure.
 - [libnx startup](https://github.com/switchbrew/libnx/blob/master/nx/source/runtime/switch_crt0.s)
