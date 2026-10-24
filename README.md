@@ -4,6 +4,12 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
+Windows development: a separate [ARM64 first-frame prototype](docs/windows-prototype.md)
+runs synthetic test code through Unicorn and displays its software framebuffer.
+It does not run Switch games or implement NVN/Vulkan on Windows.
+The separate [freestanding homebrew milestone](docs/windows-homebrew.md) loads
+own AArch64 NRO files with a five-call Horizon SVC subset (no full libnx or game support).
+
 ## Acknowledgements
 
 This project is built on other people's work:
